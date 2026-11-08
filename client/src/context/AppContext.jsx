@@ -8,84 +8,134 @@ export const AppContext = createContext();
 export const AppContextProvider = (props) => {
     const navigate = useNavigate();
     const isMounted = useRef(true);
-    
-    // Initialize state
-    const [backendUrl, setBackendUrl] = useState(import.meta.env.VITE_BACKEND_URL || 'http://localhost:4000');
+
+    const configuredBackendUrl = import.meta.env.VITE_BACKEND_URL;
+    const [backendUrl, setBackendUrl] = useState(
+        configuredBackendUrl || (import.meta.env.DEV ? "http://localhost:4000" : "")
+    );
     const [isLoading, setIsLoading] = useState(false);
     const [isAuthenticating, setIsAuthenticating] = useState(false);
     const [shLogin, setShLogin] = useState(false);
-    const [token, _setToken] = useState(() => localStorage.getItem('token') || null);
+    const [token, _setToken] = useState(() => localStorage.getItem("token") || null);
     const [credits, setCredits] = useState(0);
     const [user, setUser] = useState(() => {
-        const savedUser = localStorage.getItem('user');
-        return savedUser ? JSON.parse(savedUser) : null;
+        try {
+            const savedUser = localStorage.getItem("user");
+            return savedUser ? JSON.parse(savedUser) : null;
+        } catch {
+            localStorage.removeItem("user");
+            return null;
+        }
     });
 
-    useEffect(() => {
-        if (token) {
-            axios.defaults.headers.common['Authorization'] = `Bearer ${token}`;
-        }
-    }, [token]);
-
-    // Set token with localStorage
-    const setToken = (newToken) => {
+    const setToken = useCallback((newToken) => {
         _setToken(newToken);
         if (newToken) {
-            localStorage.setItem('token', newToken);
-            axios.defaults.headers.common['Authorization'] = `Bearer ${newToken}`;
+            localStorage.setItem("token", newToken);
+            axios.defaults.headers.common.Authorization = `Bearer ${newToken}`;
         } else {
-            localStorage.removeItem('token');
-            delete axios.defaults.headers.common['Authorization'];
+            localStorage.removeItem("token");
+            delete axios.defaults.headers.common.Authorization;
         }
-    };
-    
-    // Login function
+    }, []);
+
+    useEffect(() => {
+        if (token) axios.defaults.headers.common.Authorization = `Bearer ${token}`;
+        else delete axios.defaults.headers.common.Authorization;
+    }, [token]);
+
+    const clearAuthData = useCallback(() => {
+        localStorage.removeItem("token");
+        localStorage.removeItem("user");
+        delete axios.defaults.headers.common.Authorization;
+        if (isMounted.current) {
+            _setToken(null);
+            setUser(null);
+            setCredits(0);
+        }
+    }, []);
+
+    const loadUserData = useCallback(async (tokenOverride = null) => {
+        const effectiveToken = tokenOverride || token;
+        if (!effectiveToken) {
+            clearAuthData();
+            return;
+        }
+
+        try {
+            setIsLoading(true);
+            const config = {
+                headers: {
+                    Authorization: `Bearer ${effectiveToken}`,
+                    "Content-Type": "application/json"
+                }
+            };
+            const [userResponse, creditsResponse] = await Promise.all([
+                axios.get(`${backendUrl}/api/user/me`, config),
+                axios.get(`${backendUrl}/api/user/credits`, config)
+            ]);
+
+            if (!userResponse.data?.success || !userResponse.data.user) {
+                throw new Error("Unable to load your account");
+            }
+
+            const updatedUser = {
+                ...userResponse.data.user,
+                credits: creditsResponse.data?.success
+                    ? creditsResponse.data.credits
+                    : userResponse.data.user.credits
+            };
+            if (isMounted.current) {
+                setUser(updatedUser);
+                setCredits(updatedUser.credits);
+                localStorage.setItem("user", JSON.stringify(updatedUser));
+            }
+        } catch (error) {
+            console.error("Failed to load user data:", error);
+            if (error.response?.status === 401) {
+                toast.error("Your session has expired. Please log in again.");
+                clearAuthData();
+            }
+            throw error;
+        } finally {
+            if (isMounted.current) setIsLoading(false);
+        }
+    }, [token, backendUrl, clearAuthData]);
+
     const login = async (email, password) => {
         try {
             setIsAuthenticating(true);
-            const response = await axios.post(`${backendUrl}/api/user/login`, {
-                email,
-                password
-            });
-            
-            if (response.data?.success) {
-                setToken(response.data.token);
-                await loadUserData(response.data.token);
-                return { success: true };
+            const { data } = await axios.post(`${backendUrl}/api/user/login`, { email, password });
+            if (!data?.success || !data.token) {
+                return { success: false, message: data?.message || "Login failed" };
             }
-            return { success: false, message: response.data?.message || 'Login failed' };
+            setToken(data.token);
+            await loadUserData(data.token);
+            return { success: true };
         } catch (error) {
-            console.error('Login error:', error);
-            return { 
-                success: false, 
-                message: error.response?.data?.message || 'An error occurred during login' 
+            return {
+                success: false,
+                message: error.response?.data?.message || error.message || "An error occurred during login"
             };
         } finally {
             setIsAuthenticating(false);
         }
     };
-    
-    // Register function
+
     const register = async (name, email, password) => {
         try {
             setIsAuthenticating(true);
-            const response = await axios.post(`${backendUrl}/api/user/register`, {
-                name,
-                email,
-                password
-            });
-            
-            if (response.data?.success) {
-                setToken(response.data.token);
-                await loadUserData(response.data.token);
-                return { success: true };
+            const { data } = await axios.post(`${backendUrl}/api/user/register`, { name, email, password });
+            if (!data?.success || !data.token) {
+                return { success: false, message: data?.message || "Registration failed" };
             }
-            return { success: false, message: response.data?.message || 'Registration failed' };
+            setToken(data.token);
+            await loadUserData(data.token);
+            return { success: true };
         } catch (error) {
-            console.error('Registration error:', error);
-            return { 
-                success: false, 
-                message: error.response?.data?.message || 'An error occurred during registration',
+            return {
+                success: false,
+                message: error.response?.data?.message || error.message || "An error occurred during registration",
                 errors: error.response?.data?.errors
             };
         } finally {
@@ -93,182 +143,54 @@ export const AppContextProvider = (props) => {
         }
     };
 
-    // Clear all auth data
-    const clearAuthData = useCallback(() => {
-        if (!isMounted.current) return;
-        
-        console.log('Clearing auth data');
-        localStorage.removeItem('token');
-        localStorage.removeItem('user');
-        delete axios.defaults.headers.common['Authorization'];
-        _setToken(null);
-        setUser(null);
-        setCredits(0);
-    }, []);
-
-    // Load user data and credits
-    const loadUserData = useCallback(async (tokenOverride = null) => {
-        const effectiveToken = tokenOverride || token;
-
-        if (!effectiveToken) {
-            clearAuthData();
-            return;
-        }
-
-        if (isLoading) {
-            console.log('Load already in progress');
-            return;
-        }
-
-        try {
-            setIsLoading(true);
-            console.log('Loading user data...');
-            
-            // Load user profile and credits in parallel
-            const [userResponse, creditsResponse] = await Promise.all([
-                axios.get(`${backendUrl}/api/user/me`, {
-                    headers: {
-                        'Content-Type': 'application/json',
-                        'Authorization': `Bearer ${effectiveToken}`
-                    },
-                    validateStatus: () => true
-                }),
-                axios.get(`${backendUrl}/api/user/credits`, {
-                    headers: {
-                        'Content-Type': 'application/json',
-                        'Authorization': `Bearer ${effectiveToken}`
-                    },
-                    validateStatus: () => true
-                })
-            ]);
-
-            const userData = userResponse.data;
-            const creditsData = creditsResponse.data;
-            
-            if (userData?.success && userData.user) {
-                console.log('User data loaded:', userData.user);
-                const updatedUser = {
-                    ...userData.user,
-                    credits: creditsData?.success ? creditsData.credits : 0
-                };
-                
-                setUser(updatedUser);
-                setCredits(updatedUser.credits);
-                localStorage.setItem('user', JSON.stringify(updatedUser));
-            } else {
-                console.log('Invalid user data received');
-                clearAuthData();
-            }
-        } catch (error) {
-            console.error('Failed to load user data:', error);
-            if (error.response?.status === 401) {
-                toast.error('Your session has expired. Please log in again.');
-                clearAuthData();
-            }
-        } finally {
-            if (isMounted.current) {
-                setIsLoading(false);
-            }
-        }
-    }, [token, backendUrl, isLoading, clearAuthData]);
-
-    // Initial load
     useEffect(() => {
         isMounted.current = true;
-        let timeoutId;
-        
-        const initialize = () => {
-            if (token) {
-                loadUserData();
-            } else {
-                clearAuthData();
-            }
-        };
-        
-        // Add a small delay to prevent multiple rapid calls
-        timeoutId = setTimeout(initialize, 100);
-        
-        return () => {
-            isMounted.current = false;
-            if (timeoutId) clearTimeout(timeoutId);
-        };
-    }, []); // Empty dependency array - we only want this to run once on mount
+        if (token) loadUserData().catch(() => {});
+        return () => { isMounted.current = false; };
+    }, []);
 
-    // Logout function
     const logout = async (silent = false) => {
+        const currentToken = token;
         try {
-            if (token) {
-                console.log('Attempting to logout');
-                await axios.post(`${backendUrl}/api/user/logout`, {}, {
-                    headers: { 'Content-Type': 'application/json' },
-                    validateStatus: () => true // Don't throw for any status code
-                });
+            if (currentToken) {
+                await axios.post(
+                    `${backendUrl}/api/user/logout`,
+                    {},
+                    { headers: { Authorization: `Bearer ${currentToken}` } }
+                );
             }
         } catch (error) {
-            console.error('Logout API error (proceeding with local logout):', error);
+            console.error("Logout API error:", error);
         } finally {
-            // Always clear local data
             clearAuthData();
-            
             if (!silent) {
-                navigate('/');
-                toast.success('Logged out successfully');
+                navigate("/");
+                toast.success("Logged out successfully");
             }
         }
     };
 
-    // Function to update credits
     const updateCredits = useCallback((newCredits) => {
         setCredits(newCredits);
-        setUser((prevUser) => {
-            if (prevUser) {
-                const updatedUser = { ...prevUser, credits: newCredits };
-                localStorage.setItem('user', JSON.stringify(updatedUser));
-                return updatedUser;
-            }
-            return prevUser;
+        setUser((previousUser) => {
+            if (!previousUser) return previousUser;
+            const updatedUser = { ...previousUser, credits: newCredits };
+            localStorage.setItem("user", JSON.stringify(updatedUser));
+            return updatedUser;
         });
     }, []);
 
-    // Refresh user data
     const refreshUserData = useCallback(() => {
-        if (token) {
-            return loadUserData();
-        }
-        return Promise.resolve();
+        return token ? loadUserData() : Promise.resolve();
     }, [token, loadUserData]);
 
     const value = {
-        // User state
-        user,
-        setUser,
-        token,
-        credits,
-
-        // UI state
-        shLogin,
-        setShLogin,
-        isLoading,
-        setIsLoading,
-        isAuthenticating,
-
-        // Methods
-        setToken,
-        login,
-        register,
-        logout,
+        user, setUser, token, credits,
+        shLogin, setShLogin, isLoading, setIsLoading: setIsLoading,
+        isAuthenticating, setToken, login, register, logout,
         loadUserData: refreshUserData,
-
-        // Other
-        backendUrl,
-        setBackendUrl,
-        navigate,
-        setCredits: updateCredits
+        backendUrl, setBackendUrl, navigate, setCredits: updateCredits
     };
 
-    return (
-        <AppContext.Provider value={value}>
-            {props.children}
-        </AppContext.Provider>
-    );
+    return <AppContext.Provider value={value}>{props.children}</AppContext.Provider>;
 };
