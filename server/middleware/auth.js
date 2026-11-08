@@ -1,60 +1,60 @@
 import jwt from 'jsonwebtoken';
 import userModel from '../models/userModel.js';
+import TokenBlacklist from '../models/tokenBlacklist.js';
 
 const authMiddleware = async (req, res, next) => {
     try {
-        // Get token from header
-        const token = req.header('Authorization')?.replace('Bearer ', '');
-        
+        const authorization = req.header('Authorization');
+        const token = authorization?.startsWith('Bearer ')
+            ? authorization.slice(7).trim()
+            : null;
+
         if (!token) {
-            return res.status(401).json({ 
-                success: false, 
-                message: 'No token, authorization denied' 
+            return res.status(401).json({
+                success: false,
+                message: 'No token, authorization denied'
             });
         }
 
-        // Verify token
         let decoded;
         try {
-            decoded = jwt.verify(token, process.env.JWT_SECRET || 'default-secret-key');
-            console.log('Decoded token:', decoded);
+            decoded = jwt.verify(token, process.env.JWT_SECRET);
         } catch (error) {
-            if (error.name === 'TokenExpiredError') {
-                return res.status(401).json({ 
-                    success: false, 
-                    message: 'Session expired. Please log in again.',
-                    code: 'TOKEN_EXPIRED'
-                });
-            }
-            return res.status(401).json({ 
-                success: false, 
-                message: 'Invalid token',
-                code: 'INVALID_TOKEN'
+            const expired = error.name === 'TokenExpiredError';
+            return res.status(401).json({
+                success: false,
+                message: expired ? 'Session expired. Please log in again.' : 'Invalid token',
+                code: expired ? 'TOKEN_EXPIRED' : 'INVALID_TOKEN'
             });
         }
-        
-        // Find user by id from token
+
+        const revoked = await TokenBlacklist.exists({ token });
+        if (revoked) {
+            return res.status(401).json({
+                success: false,
+                message: 'This session has been logged out.',
+                code: 'TOKEN_REVOKED'
+            });
+        }
+
         const user = await userModel.findById(decoded.id).select('-password');
-        
         if (!user) {
-            console.log('User not found for ID:', decoded.id);
-            return res.status(401).json({ 
-                success: false, 
+            return res.status(401).json({
+                success: false,
                 message: 'User not found',
                 code: 'USER_NOT_FOUND'
             });
         }
 
-        // Attach user to request object
         req.user = user;
-        console.log('User authenticated:', { userId: user._id, email: user.email });
+        req.token = token;
+        req.tokenExpiresAt = new Date(decoded.exp * 1000);
         next();
     } catch (error) {
-        console.error('Auth middleware error:', error);
-        res.status(401).json({ 
-            success: false, 
-            message: 'Token is not valid',
-            error: process.env.NODE_ENV === 'development' ? error.message : undefined
+        console.error('Authentication middleware error:', error);
+        return res.status(500).json({
+            success: false,
+            message: 'Authentication could not be completed'
         });
     }
 };
